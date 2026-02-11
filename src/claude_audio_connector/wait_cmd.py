@@ -1,15 +1,17 @@
+import asyncio
 import os
 import sys
 import time
 
-MSG_PATH = "/tmp/claude-audio.msg"
-READY_PATH = "/tmp/claude-audio.ready"
-PID_PATH = "/tmp/claude-audio.pid"
-STATUS_PATH = "/tmp/claude-audio.status"
-WAITING_PATH = "/tmp/claude-audio.waiting"
+from .ipc import wait_for_message
+from .runtime import runtime_path, socket_path
+
+PID_PATH = runtime_path("pid")
+STATUS_PATH = runtime_path("status")
 
 STATES = {
     "idle": "Listening...",
+    "error": "Error",
 }
 
 
@@ -18,28 +20,24 @@ def main() -> None:
         sys.stderr.write("(voice daemon not running)\n")
         sys.exit(1)
 
-    # Signal to the daemon that wait_cmd is active (fast path)
-    try:
-        with open(WAITING_PATH, "w") as f:
-            f.write(str(os.getpid()))
-    except OSError:
-        pass
-
     last_shown = ""
 
     try:
+        # Kick off wait in background while we still show status
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        wait_task = loop.create_task(wait_for_message(socket_path()))
+
         while True:
-            if os.path.exists(READY_PATH):
-                try:
-                    os.remove(READY_PATH)
-                    with open(MSG_PATH, "r") as f:
-                        text = f.read().strip()
-                    os.remove(MSG_PATH)
+            loop.run_until_complete(asyncio.sleep(0))
+            if wait_task.done():
+                text = wait_task.result()
+                if text is None:
+                    wait_task = loop.create_task(wait_for_message(socket_path()))
+                else:
                     if text:
                         sys.stdout.write(text + "\n")
                     return
-                except OSError:
-                    pass
 
             if not os.path.exists(PID_PATH):
                 return
@@ -63,10 +61,16 @@ def main() -> None:
 
             time.sleep(0.08)
     finally:
-        # Clear waiting flag so daemon knows to interrupt next time
         try:
-            os.remove(WAITING_PATH)
-        except OSError:
+            if not wait_task.done():
+                wait_task.cancel()
+                try:
+                    loop.run_until_complete(wait_task)
+                except (asyncio.CancelledError, Exception):
+                    pass
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.close()
+        except Exception:
             pass
 
 

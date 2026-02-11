@@ -1,15 +1,10 @@
 import asyncio
 import re
 import sys
-import time
 
-from sarvamai import SarvamAI
-
-from .audio_utils import chunks_to_wav, mic_stream, rms, trim_silence
+from .audio_utils import CaptureConfig, VadConfig, record_utterance
 from .config import load_config, load_env_from_args
-
-ENERGY_THRESHOLD = 0.005
-SILENCE_AFTER_SPEECH = 2.0
+from .stt import StreamingTranscriber, streaming_supported, transcribe_chunks
 
 WAKE_RE = re.compile(
     r"^(?:hey|a|ok|okay)\s+(?:claude|cloud|claud|klaud|lord|clod|klaude|clade)[,.:!?\s]*",
@@ -18,85 +13,69 @@ WAKE_RE = re.compile(
 STOP_PHRASES = {"stop listening", "no audio", "stop audio", "exit audio"}
 
 
-def transcribe(client: SarvamAI, wav_buf, cfg) -> str:
-    resp = client.speech_to_text.transcribe(
-        file=wav_buf,
-        language_code=cfg.stt_language,
-        model=cfg.stt_model,
-    )
-    text = (resp.transcript or "").strip()
-    if text == "<nospeech>":
-        return ""
-    return text
-
-
-def listen_once(cfg) -> str | None:
+async def listen_once(cfg) -> str | None:
     """Listen for 'hey claude ...' and return the part after the wake word.
     Returns None if killed externally, empty string on stop command."""
-    client = SarvamAI(api_subscription_key=cfg.api_key)
-    loop = asyncio.new_event_loop()
-    result: str | None = None
+    vad_cfg = VadConfig(
+        sample_rate=cfg.stt_sample_rate,
+        blocksize=cfg.audio_blocksize,
+        use_local_vad=cfg.local_vad,
+        vad_mode=cfg.local_vad_mode,
+        energy_threshold=cfg.local_vad_threshold,
+        noise_ms=cfg.local_vad_noise_ms,
+        noise_multiplier=cfg.local_vad_multiplier,
+    )
+    cap_cfg = CaptureConfig(
+        sample_rate=cfg.stt_sample_rate,
+        blocksize=cfg.audio_blocksize,
+        queue_ms=cfg.audio_queue_ms,
+        pre_roll_ms=cfg.local_vad_preroll_ms,
+        silence_hold_ms=cfg.local_vad_hold_ms,
+        no_speech_timeout=cfg.no_speech_timeout,
+        max_utterance_sec=cfg.max_utterance_sec,
+        vad_config=vad_cfg,
+    )
 
-    async def run():
-        nonlocal result
-        audio_q: asyncio.Queue = asyncio.Queue()
+    streaming_ok = streaming_supported(cfg)
 
-        with mic_stream(audio_q, cfg.stt_sample_rate, device=cfg.stt_input_device):
-            while True:
-                chunks: list[bytes] = []
-                last_voice = 0.0
-                heard_speech = False
+    while True:
+        if streaming_ok:
+            with StreamingTranscriber(cfg) as stt:
+                chunks = await record_utterance(
+                    cap_cfg,
+                    device=cfg.stt_input_device,
+                    on_chunk=stt.send_pcm,
+                    status_cb=None,
+                )
+                result = stt.finalize(cfg.stt_streaming_max_wait_ms / 1000)
+                text = result.transcript.strip() or transcribe_chunks(chunks, cfg)
+        else:
+            chunks = await record_utterance(
+                cap_cfg,
+                device=cfg.stt_input_device,
+                on_chunk=None,
+                status_cb=None,
+            )
+            text = transcribe_chunks(chunks, cfg)
 
-                while True:
-                    audio = await audio_q.get()
-                    now = time.monotonic()
+        if not text:
+            sys.stderr.write("  (noise, ignoring)\n")
+            sys.stderr.flush()
+            continue
 
-                    energy = rms(audio)
-                    chunks.append(audio)
+        sys.stderr.write(f"  heard: \"{text}\"\n")
+        sys.stderr.flush()
 
-                    if energy >= ENERGY_THRESHOLD:
-                        last_voice = now
-                        heard_speech = True
+        if text.lower().strip() in STOP_PHRASES:
+            return ""
 
-                    if not heard_speech:
-                        if len(chunks) > 100:
-                            chunks = chunks[-50:]
-                        continue
-
-                    if now - last_voice > SILENCE_AFTER_SPEECH:
-                        break
-
-                trimmed = trim_silence(chunks)
-                if not trimmed:
-                    continue
-
-                wav = chunks_to_wav(trimmed, cfg.stt_sample_rate)
-                text = transcribe(client, wav, cfg)
-
-                if not text:
-                    sys.stderr.write("  (noise, ignoring)\n")
-                    sys.stderr.flush()
-                    continue
-
-                sys.stderr.write(f"  heard: \"{text}\"\n")
-                sys.stderr.flush()
-
-                if text.lower().strip() in STOP_PHRASES:
-                    result = ""
-                    return
-
-                match = WAKE_RE.match(text)
-                if match:
-                    prompt = text[match.end():].strip()
-                    if prompt:
-                        result = prompt
-                        return
-                    sys.stderr.write("  (wake word only, waiting for more)\n")
-                    sys.stderr.flush()
-
-    loop.run_until_complete(run())
-    loop.close()
-    return result
+        match = WAKE_RE.match(text)
+        if match:
+            prompt = text[match.end() :].strip()
+            if prompt:
+                return prompt
+            sys.stderr.write("  (wake word only, waiting for more)\n")
+            sys.stderr.flush()
 
 
 def main() -> None:
@@ -106,7 +85,10 @@ def main() -> None:
     sys.stderr.write("👂 Listening for 'hey claude'...\n")
     sys.stderr.flush()
 
-    text = listen_once(cfg)
+    try:
+        text = asyncio.run(listen_once(cfg))
+    except KeyboardInterrupt:
+        return
 
     if text:
         sys.stderr.write(f"📝 {text}\n")

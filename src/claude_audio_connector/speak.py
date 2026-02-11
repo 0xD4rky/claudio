@@ -7,6 +7,7 @@ from cartesia import Cartesia
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="cartesia")
 
 from .config import load_config, load_env_from_args
+from .runtime import runtime_path
 
 SPEED_MAP = {
     "slowest": -1.0,
@@ -15,6 +16,19 @@ SPEED_MAP = {
     "fast": 0.25,
     "fastest": 0.5,
 }
+
+STATUS_PATH = runtime_path("status")
+
+
+def _should_barge_in(cfg) -> bool:
+    if not cfg.tts_barge_in:
+        return False
+    try:
+        with open(STATUS_PATH, "r") as f:
+            status = f.read().strip()
+        return status.startswith("recording")
+    except OSError:
+        return False
 
 
 def speak(text: str, cfg=None) -> None:
@@ -40,6 +54,8 @@ def speak(text: str, cfg=None) -> None:
             speed=speed,
             language="en",
         ):
+            if _should_barge_in(cfg):
+                break
             stream.write(chunk)
 
 

@@ -1,23 +1,29 @@
 import os
 import signal
-import sys
+import subprocess
 
-PID_PATH = "/tmp/claude-audio.pid"
+from .runtime import runtime_path, socket_path
+
 FILES = (
-    "/tmp/claude-audio.pid",
-    "/tmp/claude-audio.msg",
-    "/tmp/claude-audio.ready",
-    "/tmp/claude-audio.status",
+    runtime_path("pid"),
+    runtime_path("status"),
+    socket_path(),
 )
 
 
 def main() -> None:
-    if os.path.exists(PID_PATH):
-        try:
-            pid = int(open(PID_PATH).read().strip())
-            os.kill(pid, signal.SIGTERM)
-        except (OSError, ValueError):
-            pass
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "claude_audio_connector.daemon"],
+            capture_output=True, text=True, check=False,
+        )
+        for line in result.stdout.strip().splitlines():
+            try:
+                os.kill(int(line.strip()), signal.SIGTERM)
+            except (OSError, ValueError):
+                pass
+    except Exception:
+        pass
 
     for f in FILES:
         try:

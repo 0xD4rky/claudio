@@ -1,79 +1,72 @@
 import asyncio
-
 import sys
-import time
 
-from sarvamai import SarvamAI
-
-from .audio_utils import chunks_to_wav, mic_stream, rms, trim_silence
+from .audio_utils import CaptureConfig, VadConfig, record_utterance
 from .config import load_config, load_env_from_args
-
-NO_SPEECH_TIMEOUT = 10
-SILENCE_AFTER_SPEECH = 1.0
-ENERGY_THRESHOLD = 0.005
+from .stt import StreamingTranscriber, streaming_supported, transcribe_chunks
 
 
-def capture_audio(cfg) -> list[bytes]:
-    loop = asyncio.new_event_loop()
-    chunks: list[bytes] = []
-    started = time.monotonic()
-    last_voice = 0.0
-    heard_speech = False
+async def capture_once(cfg) -> str:
+    vad_cfg = VadConfig(
+        sample_rate=cfg.stt_sample_rate,
+        blocksize=cfg.audio_blocksize,
+        use_local_vad=cfg.local_vad,
+        vad_mode=cfg.local_vad_mode,
+        energy_threshold=cfg.local_vad_threshold,
+        noise_ms=cfg.local_vad_noise_ms,
+        noise_multiplier=cfg.local_vad_multiplier,
+    )
+    cap_cfg = CaptureConfig(
+        sample_rate=cfg.stt_sample_rate,
+        blocksize=cfg.audio_blocksize,
+        queue_ms=cfg.audio_queue_ms,
+        pre_roll_ms=cfg.local_vad_preroll_ms,
+        silence_hold_ms=cfg.local_vad_hold_ms,
+        no_speech_timeout=cfg.no_speech_timeout,
+        max_utterance_sec=cfg.max_utterance_sec,
+        vad_config=vad_cfg,
+    )
 
-    async def record():
-        nonlocal last_voice, heard_speech
-        audio_q: asyncio.Queue = asyncio.Queue()
-        with mic_stream(audio_q, cfg.stt_sample_rate, device=cfg.stt_input_device):
-            while True:
-                audio = await audio_q.get()
-                chunks.append(audio)
-                now = time.monotonic()
-                energy = rms(audio)
+    sys.stderr.write("🎤 Listening... (speak now)\n")
+    sys.stderr.flush()
 
-                if energy >= ENERGY_THRESHOLD:
-                    last_voice = now
-                    if not heard_speech:
-                        heard_speech = True
-                        sys.stderr.write("🗣️  Speech detected...\n")
-                        sys.stderr.flush()
+    streaming_ok = streaming_supported(cfg)
+    if streaming_ok:
+        with StreamingTranscriber(cfg) as stt:
+            chunks = await record_utterance(
+                cap_cfg,
+                device=cfg.stt_input_device,
+                on_chunk=stt.send_pcm,
+                status_cb=None,
+            )
+            result = stt.finalize(cfg.stt_streaming_max_wait_ms / 1000)
+            if result.error:
+                sys.stderr.write("(streaming error, falling back to batch)\n")
+                sys.stderr.flush()
+            text = result.transcript.strip()
+            if text:
+                return text
+            return transcribe_chunks(chunks, cfg)
 
-                if not heard_speech and now - started > NO_SPEECH_TIMEOUT:
-                    break
-                if heard_speech and now - last_voice > SILENCE_AFTER_SPEECH:
-                    break
-
-    loop.run_until_complete(record())
-    loop.close()
-    return chunks
+    chunks = await record_utterance(
+        cap_cfg,
+        device=cfg.stt_input_device,
+        on_chunk=None,
+        status_cb=None,
+    )
+    return transcribe_chunks(chunks, cfg)
 
 
 def main() -> None:
     load_env_from_args(sys.argv[1:])
     cfg = load_config()
-    client = SarvamAI(api_subscription_key=cfg.api_key)
 
-    sys.stderr.write("🎤 Listening... (speak now)\n")
-    sys.stderr.flush()
-
-    chunks = capture_audio(cfg)
-    trimmed = trim_silence(chunks)
-
-    if not trimmed:
-        sys.stderr.write("(no speech detected)\n")
-        sys.stderr.flush()
+    try:
+        text = asyncio.run(capture_once(cfg))
+    except KeyboardInterrupt:
         return
 
-    sys.stderr.write("⏳ Transcribing...\n")
-    sys.stderr.flush()
-
-    wav = chunks_to_wav(trimmed, cfg.stt_sample_rate)
-    resp = client.speech_to_text.transcribe(
-        file=wav,
-        language_code=cfg.stt_language,
-        model=cfg.stt_model,
-    )
-    text = (resp.transcript or "").strip()
-    if text and text != "<nospeech>":
+    if text:
         sys.stderr.write(f"📝 {text}\n")
         sys.stderr.flush()
         sys.stdout.write(text + "\n")

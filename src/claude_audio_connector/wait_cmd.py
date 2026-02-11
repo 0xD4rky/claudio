@@ -9,10 +9,7 @@ from .runtime import runtime_path, socket_path
 PID_PATH = runtime_path("pid")
 STATUS_PATH = runtime_path("status")
 
-STATES = {
-    "idle": "Listening...",
-    "error": "Error",
-}
+DISPLAY = {"idle": "Listening...", "error": "Error", "recording": "Recording...", "processing": "Processing..."}
 
 
 def main() -> None:
@@ -20,20 +17,18 @@ def main() -> None:
         sys.stderr.write("(voice daemon not running)\n")
         sys.exit(1)
 
+    sock = socket_path()
+    loop = asyncio.new_event_loop()
+    task = loop.create_task(wait_for_message(sock))
     last_shown = ""
 
     try:
-        # Kick off wait in background while we still show status
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        wait_task = loop.create_task(wait_for_message(socket_path()))
-
         while True:
             loop.run_until_complete(asyncio.sleep(0))
-            if wait_task.done():
-                text = wait_task.result()
+            if task.done():
+                text = task.result()
                 if text is None:
-                    wait_task = loop.create_task(wait_for_message(socket_path()))
+                    task = loop.create_task(wait_for_message(sock))
                 else:
                     if text:
                         sys.stdout.write(text + "\n")
@@ -50,9 +45,9 @@ def main() -> None:
                 pass
 
             if status.startswith("heard:"):
-                display = f"heard: \"{status[6:]}\""
+                display = f'heard: "{status[6:]}"'
             else:
-                display = STATES.get(status, STATES["idle"])
+                display = DISPLAY.get(status, DISPLAY["idle"])
 
             if display != last_shown:
                 sys.stderr.write(f"\r\033[K\033[2m{display}\033[0m")
@@ -61,13 +56,13 @@ def main() -> None:
 
             time.sleep(0.08)
     finally:
+        if not task.done():
+            task.cancel()
+            try:
+                loop.run_until_complete(task)
+            except (asyncio.CancelledError, Exception):
+                pass
         try:
-            if not wait_task.done():
-                wait_task.cancel()
-                try:
-                    loop.run_until_complete(wait_task)
-                except (asyncio.CancelledError, Exception):
-                    pass
             loop.run_until_complete(loop.shutdown_asyncgens())
             loop.close()
         except Exception:

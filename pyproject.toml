@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claude-audio-connector"
+version = "0.1.0"
+description = "Voice input for Claude Code via /audio slash command using Sarvam STT."
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Your Name", email = "your.email@example.com"},
+]
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+  "cartesia>=3.0.0",
+  "sarvamai",
+  "sounddevice>=0.4.6",
+]
+
+[project.scripts]
+claude-audio-capture = "claude_audio_connector.capture:main"
+claude-audio-listen = "claude_audio_connector.listen:main"
+claude-audio-speak = "claude_audio_connector.speak:main"
+claude-audio-daemon = "claude_audio_connector.daemon:main"
+claude-audio-wait = "claude_audio_connector.wait_cmd:main"
+claude-audio-start = "claude_audio_connector.start_cmd:main"
+claude-audio-stop = "claude_audio_connector.stop_cmd:main"
+
+[project.urls]
+Homepage = "https://github.com/yourusername/claude-audio-connector"
+Repository = "https://github.com/yourusername/claude-audio-connector"

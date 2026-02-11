@@ -24,7 +24,9 @@ classifiers = [
 dependencies = [
   "cartesia>=3.0.0",
   "sarvamai",
+  "setuptools<71",
   "sounddevice>=0.4.6",
+  "webrtcvad>=2.0.10",
 ]
 
 [project.scripts]
